@@ -161,6 +161,26 @@ func TestParseTrojanRejectsInvalidPortRange(t *testing.T) {
 	}
 }
 
+func TestParseVMess_WS(t *testing.T) {
+	raw := "vmess://eyJ2IjoiMiIsInBzIjoiQ0YtVk1lc3MtVGVzdCIsImFkZCI6ImV4YW1wbGUuY29tIiwicG9ydCI6NDQzLCJpZCI6IjEyMzQ1Njc4LTEyMzQtMTIzNC0xMjM0LTEyMzQ1Njc4OWFiYyIsImFpZCI6MCwic2N5IjoiYXV0byIsIm5ldCI6IndzIiwidHlwZSI6Im5vbmUiLCJob3N0IjoiZXhhbXBsZS5jb20iLCJwYXRoIjoiL2Rvd25sb2FkIiwidGxzIjoidGxzIiwic25pIjoiZXhhbXBsZS5jb20ifQ=="
+
+	cfg, err := ParseProxyURL(raw)
+	if err != nil {
+		t.Fatalf("ParseProxyURL failed: %v", err)
+	}
+
+	assertEqual(t, "Protocol", cfg.Protocol, "vmess")
+	assertEqual(t, "UUID", cfg.UUID, "12345678-1234-1234-1234-123456789abc")
+	assertEqual(t, "Address", cfg.Address, "example.com")
+	assertEqual(t, "Port", itoa(cfg.Port), "443")
+	assertEqual(t, "Network", cfg.Network, "ws")
+	assertEqual(t, "Security", cfg.Security, "tls")
+	assertEqual(t, "SNI", cfg.SNI, "example.com")
+	assertEqual(t, "Path", cfg.Path, "/download")
+	assertEqual(t, "Host", cfg.Host, "example.com")
+	assertEqual(t, "Remark", cfg.Remark, "CF-VMess-Test")
+}
+
 func assertEqual(t *testing.T, field, got, want string) {
 	t.Helper()
 	if got != want {
