@@ -1,16 +1,18 @@
 package xraytest
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-// VLESSConfig holds parsed parameters from a VLESS or Trojan share URL.
+// VLESSConfig holds parsed parameters from a VLESS, Trojan or VMess share URL.
 // Check the Protocol field to know which type this is.
 type VLESSConfig struct {
-	// Protocol is "vless" or "trojan".
+	// Protocol is "vless", "trojan", or "vmess".
 	Protocol string
 
 	// VLESS-specific
@@ -42,9 +44,13 @@ type VLESSConfig struct {
 
 	// Metadata
 	Remark string
+
+	// Custom configurations passed to speed runner
+	SpeedURL  string
+	SpeedSize int64
 }
 
-// ParseProxyURL auto-detects the protocol (vless:// or trojan://) and parses
+// ParseProxyURL auto-detects the protocol (vless://, trojan://, or vmess://) and parses
 // the share URL into a VLESSConfig. Returns an error if the scheme is unknown.
 func ParseProxyURL(raw string) (*VLESSConfig, error) {
 	raw = strings.TrimSpace(raw)
@@ -54,9 +60,103 @@ func ParseProxyURL(raw string) (*VLESSConfig, error) {
 		return ParseVLESS(raw)
 	case strings.HasPrefix(lower, "trojan://"):
 		return ParseTrojan(raw)
+	case strings.HasPrefix(lower, "vmess://"):
+		return ParseVMess(raw)
 	default:
-		return nil, fmt.Errorf("unsupported URL scheme — must start with vless:// or trojan://")
+		return nil, fmt.Errorf("unsupported URL scheme — must start with vless://, trojan://, or vmess://")
 	}
+}
+
+// ParseVMess parses a vmess:// share URL (base64-encoded JSON) into a VLESSConfig.
+func ParseVMess(raw string) (*VLESSConfig, error) {
+	if !hasScheme(raw, "vmess") {
+		return nil, fmt.Errorf("not a vmess:// URL")
+	}
+	b64 := stripScheme(raw, "vmess")
+	if idx := strings.Index(b64, "?"); idx != -1 {
+		b64 = b64[:idx]
+	}
+	if idx := strings.Index(b64, "#"); idx != -1 {
+		b64 = b64[:idx]
+	}
+	b64 = strings.TrimSpace(b64)
+	b64 = strings.ReplaceAll(b64, " ", "")
+
+	// Fix base64 padding
+	if l := len(b64) % 4; l > 0 {
+		b64 += strings.Repeat("=", 4-l)
+	}
+
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		data, err = base64.URLEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("decode vmess base64: %w", err)
+		}
+	}
+
+	type VMessJSON struct {
+		V    interface{} `json:"v"`
+		Ps   string      `json:"ps"`
+		Add  string      `json:"add"`
+		Port interface{} `json:"port"`
+		Id   string      `json:"id"`
+		Aid  interface{} `json:"aid"`
+		Scy  string      `json:"scy"`
+		Net  string      `json:"net"`
+		Type string      `json:"type"`
+		Host string      `json:"host"`
+		Path string      `json:"path"`
+		Tls  string      `json:"tls"`
+		Sni  string      `json:"sni"`
+		Alpn string      `json:"alpn"`
+		Fp   string      `json:"fp"`
+	}
+
+	var vj VMessJSON
+	if err := json.Unmarshal(data, &vj); err != nil {
+		return nil, fmt.Errorf("parse vmess json: %w", err)
+	}
+
+	var port int
+	switch p := vj.Port.(type) {
+	case float64:
+		port = int(p)
+	case string:
+		port, _ = strconv.Atoi(p)
+	}
+	if port == 0 {
+		port = 443
+	}
+
+	security := vj.Tls
+	if security == "" {
+		security = "none"
+	}
+
+	cfg := &VLESSConfig{
+		Protocol:    "vmess",
+		UUID:        vj.Id,
+		Address:     vj.Add,
+		Port:        port,
+		Network:     vj.Net,
+		Security:    security,
+		SNI:         vj.Sni,
+		Host:        vj.Host,
+		Path:        vj.Path,
+		Fingerprint: vj.Fp,
+		Remark:      vj.Ps,
+	}
+	if cfg.Network == "" {
+		cfg.Network = "tcp"
+	}
+	if cfg.Security == "tls" && cfg.SNI == "" {
+		cfg.SNI = cfg.Host
+	}
+	if vj.Alpn != "" {
+		cfg.ALPN = strings.Split(vj.Alpn, ",")
+	}
+	return cfg, nil
 }
 
 // ParseVLESS parses a vless:// share URL into a VLESSConfig.
@@ -177,8 +277,53 @@ func (c *VLESSConfig) WithEndpoint(newAddr string, newPort int) *VLESSConfig {
 	return &copy
 }
 
-// ToShareURL reconstructs a vless:// share URL from the config.
+// ToShareURL reconstructs a vless://, trojan://, or vmess:// share URL from the config.
 func (c *VLESSConfig) ToShareURL() string {
+	if c.Protocol == "vmess" {
+		type VMessJSON struct {
+			V    string `json:"v"`
+			Ps   string `json:"ps"`
+			Add  string `json:"add"`
+			Port int    `json:"port"`
+			Id   string `json:"id"`
+			Aid  int    `json:"aid"`
+			Scy  string `json:"scy"`
+			Net  string `json:"net"`
+			Type string `json:"type"`
+			Host string `json:"host"`
+			Path string `json:"path"`
+			Tls  string `json:"tls"`
+			Sni  string `json:"sni"`
+			Alpn string `json:"alpn"`
+			Fp   string `json:"fp"`
+		}
+		tlsVal := ""
+		if c.Security == "tls" {
+			tlsVal = "tls"
+		}
+		vj := VMessJSON{
+			V:    "2",
+			Ps:   c.Remark,
+			Add:  c.Address,
+			Port: c.Port,
+			Id:   c.UUID,
+			Aid:  0,
+			Scy:  "auto",
+			Net:  c.Network,
+			Type: "none",
+			Host: c.Host,
+			Path: c.Path,
+			Tls:  tlsVal,
+			Sni:  c.SNI,
+			Fp:   c.Fingerprint,
+		}
+		if len(c.ALPN) > 0 {
+			vj.Alpn = strings.Join(c.ALPN, ",")
+		}
+		b, _ := json.Marshal(vj)
+		return "vmess://" + base64.StdEncoding.EncodeToString(b)
+	}
+
 	params := url.Values{}
 	params.Set("encryption", c.Encryption)
 	params.Set("security", c.Security)
@@ -222,6 +367,9 @@ func (c *VLESSConfig) ToShareURL() string {
 	}
 
 	remark := url.QueryEscape(c.Remark)
+	if c.Protocol == "trojan" {
+		return fmt.Sprintf("trojan://%s@%s:%d?%s#%s", c.Password, c.Address, c.Port, params.Encode(), remark)
+	}
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s", c.UUID, c.Address, c.Port, params.Encode(), remark)
 }
 

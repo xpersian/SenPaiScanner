@@ -509,6 +509,9 @@ func speedBudget(total, spent time.Duration) time.Duration {
 
 func measureProxySpeed(ctx context.Context, proxyAddr string, cfg *VLESSConfig) (int64, float64) {
 	samples := []int64{speedSampleBytes, speedSampleBytesFast}
+	if cfg != nil && cfg.SpeedSize > 0 {
+		samples = []int64{cfg.SpeedSize}
+	}
 	for _, sample := range samples {
 		for _, target := range speedTestTargets(cfg, sample) {
 			bytesRecv, throughput, err := downloadThroughProxy(ctx, proxyAddr, target.url, sample, target.relaxed, target.host)
@@ -518,9 +521,13 @@ func measureProxySpeed(ctx context.Context, proxyAddr string, cfg *VLESSConfig) 
 		}
 	}
 
+	burstBytes := speedSampleBytesFast
+	if cfg != nil && cfg.SpeedSize > 0 {
+		burstBytes = cfg.SpeedSize
+	}
 	// WS/xhttp tunnels often block speed.cloudflare.com but still carry trace traffic.
 	// Estimate throughput by saturating the known-good trace endpoint in parallel.
-	return burstProxyThroughput(ctx, proxyAddr, traceProbeURL, speedSampleBytesFast)
+	return burstProxyThroughput(ctx, proxyAddr, traceProbeURL, burstBytes)
 }
 
 func speedTestTargets(cfg *VLESSConfig, sampleBytes int64) []speedTarget {
@@ -542,6 +549,10 @@ func speedTestTargets(cfg *VLESSConfig, sampleBytes int64) []speedTarget {
 			relaxed:  relaxed,
 			minBytes: minBytes,
 		})
+	}
+
+	if cfg != nil && cfg.SpeedURL != "" {
+		add(cfg.SpeedURL, true)
 	}
 
 	if cfg != nil {

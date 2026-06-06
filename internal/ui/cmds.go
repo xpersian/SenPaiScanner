@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -720,4 +722,30 @@ func parseTimeout(raw string, fallback time.Duration) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 	return fallback
+}
+
+// MetaMsg holds network metadata fetched from speed.cloudflare.com/meta
+type MetaMsg struct {
+	ASN            int    `json:"asn"`
+	ASOrganization string `json:"asOrganization"`
+	Colo           string `json:"colo"`
+	Country        string `json:"country"`
+	IP             string `json:"ip"`
+}
+
+// FetchMetaCmd fetches connection metadata from cloudflare meta server
+func FetchMetaCmd() tea.Cmd {
+	return func() tea.Msg {
+		client := http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get("https://speed.cloudflare.com/meta")
+		if err != nil {
+			return MetaMsg{ASOrganization: "Unknown ISP"}
+		}
+		defer resp.Body.Close()
+		var m MetaMsg
+		if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+			return MetaMsg{ASOrganization: "Unknown ISP"}
+		}
+		return m
+	}
 }

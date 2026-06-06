@@ -234,12 +234,12 @@ type AppModel struct {
 	configIPMode        int // 0=random Cloudflare IPs, 1=from ips.txt
 	configCustomInput   textinput.Model
 	configCustomMode    bool
-	configCustomRow     int    // 1=count, 2=workers, 3=timeout, 5=topN custom
+	configCustomRow     int    // 1=count, 2=workers, 3=timeout, 5=topN custom, 6=min speed custom, 7=speed size custom
 	configCountCustom   string // value when Custom count is selected
 	configWorkersCustom string // value when Custom workers is selected
 	configTimeoutCustom string // value when Custom timeout is selected
 	configTopNCustom    string // value when Custom top N is selected
-	configOptionalRow   int    // 0=config URL, 1=validate top N
+	configOptionalRow   int    // 0=config URL, 1=validate top N, 2=min speed, 3=speed url, 4=speed size
 	configPortFocus     int
 	configSelectedPorts map[int]bool
 	// phase 1 state
@@ -249,6 +249,13 @@ type AppModel struct {
 	configPhase1Stats   StatsMsg
 	configPhase1Total   int // intended IP count for Phase 1 progress display
 	liveResultPath      string
+
+	configMinSpeedIdx     int
+	configMinSpeedCustom  string
+	configSpeedURLInput   textinput.Model
+	configSpeedSizeIdx    int
+	configSpeedSizeCustom string
+	ispInfo               string
 
 	// shared
 	statusMsg string
@@ -280,17 +287,22 @@ var modes = []string{"tls", "tcp", "http"}
 
 // SavedConfig represents the scan settings that can be persisted.
 type SavedConfig struct {
-	IPMode        int    `json:"ip_mode"`
-	CountIdx      int    `json:"count_idx"`
-	CountCustom   string `json:"count_custom"`
-	WorkersIdx    int    `json:"workers_idx"`
-	WorkersCustom string `json:"workers_custom"`
-	TimeoutIdx    int    `json:"timeout_idx"`
-	TimeoutCustom string `json:"timeout_custom"`
-	Ports         []int  `json:"ports"`
-	ConfigURL     string `json:"config_url"`
-	TopNIdx       int    `json:"top_n_idx"`
-	TopNCustom    string `json:"top_n_custom"`
+	IPMode          int    `json:"ip_mode"`
+	CountIdx        int    `json:"count_idx"`
+	CountCustom     string `json:"count_custom"`
+	WorkersIdx      int    `json:"workers_idx"`
+	WorkersCustom   string `json:"workers_custom"`
+	TimeoutIdx      int    `json:"timeout_idx"`
+	TimeoutCustom   string `json:"timeout_custom"`
+	Ports           []int  `json:"ports"`
+	ConfigURL       string `json:"config_url"`
+	TopNIdx         int    `json:"top_n_idx"`
+	TopNCustom      string `json:"top_n_custom"`
+	MinSpeedIdx     int    `json:"min_speed_idx"`
+	MinSpeedCustom  string `json:"min_speed_custom"`
+	SpeedURL        string `json:"speed_url"`
+	SpeedSizeIdx    int    `json:"speed_size_idx"`
+	SpeedSizeCustom string `json:"speed_size_custom"`
 }
 
 // AppConfig wraps SavedConfig to allow for future settings.
@@ -338,17 +350,22 @@ func saveAppConfig(cfg AppConfig) error {
 func defaultAppConfig() AppConfig {
 	return AppConfig{
 		LastConfig: SavedConfig{
-			IPMode:        0, // Random
-			CountIdx:      1, // 5,000
-			CountCustom:   "",
-			WorkersIdx:    0, // 50
-			WorkersCustom: "",
-			TimeoutIdx:    2, // 5s
-			TimeoutCustom: "",
-			Ports:         nil,
-			ConfigURL:     "",
-			TopNIdx:       2, // 50
-			TopNCustom:    "",
+			IPMode:          0, // Random
+			CountIdx:        1, // 5,000
+			CountCustom:     "",
+			WorkersIdx:      0, // 50
+			WorkersCustom:   "",
+			TimeoutIdx:      2, // 5s
+			TimeoutCustom:   "",
+			Ports:           nil,
+			ConfigURL:       "",
+			TopNIdx:         2, // 50
+			TopNCustom:      "",
+			MinSpeedIdx:     0, // None
+			MinSpeedCustom:  "",
+			SpeedURL:        "",
+			SpeedSizeIdx:    1, // 512 KB
+			SpeedSizeCustom: "",
 		},
 	}
 }
@@ -363,6 +380,11 @@ func (m *AppModel) applySavedConfig(cfg SavedConfig) {
 	m.configTimeoutCustom = cfg.TimeoutCustom
 	m.configTopNIdx = cfg.TopNIdx
 	m.configTopNCustom = cfg.TopNCustom
+	m.configMinSpeedIdx = cfg.MinSpeedIdx
+	m.configMinSpeedCustom = cfg.MinSpeedCustom
+	m.configSpeedURLInput.SetValue(cfg.SpeedURL)
+	m.configSpeedSizeIdx = cfg.SpeedSizeIdx
+	m.configSpeedSizeCustom = cfg.SpeedSizeCustom
 	m.configSelectedPorts = make(map[int]bool)
 	for _, port := range cfg.Ports {
 		m.configSelectedPorts[port] = true
@@ -387,20 +409,26 @@ func NewApp(version string) AppModel {
 	customInput.CharLimit = 10
 	customInput.Width = 14
 
+	speedURLInput := textinput.New()
+	speedURLInput.Placeholder = "empty = default (speed.cloudflare.com)"
+	speedURLInput.CharLimit = 500
+	speedURLInput.Width = 0
+
 	m := AppModel{
-		page:             PageHome,
-		spinner:          sp,
-		scanCfg:          defaultScanConfig(),
-		version:          version,
-		width:            120,
-		height:           40,
-		scanStarted:      time.Now(),
-		quickCustomInput: customInput,
+		page:                PageHome,
+		spinner:             sp,
+		scanCfg:             defaultScanConfig(),
+		version:             version,
+		width:               120,
+		height:              40,
+		scanStarted:         time.Now(),
+		quickCustomInput:    customInput,
+		configSpeedURLInput: speedURLInput,
 	}
 
 	// Config input for "Scan with Config"
 	cfgInput := textinput.New()
-	cfgInput.Placeholder = "vless:// or trojan:// share URL"
+	cfgInput.Placeholder = "vless://, trojan://, or vmess:// share URL"
 	cfgInput.CharLimit = 2000
 	cfgInput.Width = 0 // 0 = no fixed width, grows with content
 	m.configInput = cfgInput
@@ -468,11 +496,22 @@ func (m AppModel) Init() tea.Cmd {
 		m.spinner.Tick,
 		textinput.Blink,
 		tea.EnableBracketedPaste,
+		FetchMetaCmd(),
 	)
 }
 
 func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+
+	case MetaMsg:
+		if msg.ASOrganization != "" {
+			if msg.Colo != "" {
+				m.ispInfo = fmt.Sprintf("ISP: %s (%s)", msg.ASOrganization, msg.Colo)
+			} else {
+				m.ispInfo = fmt.Sprintf("ISP: %s", msg.ASOrganization)
+			}
+		}
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -1187,6 +1226,10 @@ func (m AppModel) updateFormInputs(msg tea.Msg) (AppModel, tea.Cmd) {
 			var cmd tea.Cmd
 			m.configInput, cmd = m.configInput.Update(msg)
 			cmds = append(cmds, cmd)
+
+			var cmd2 tea.Cmd
+			m.configSpeedURLInput, cmd2 = m.configSpeedURLInput.Update(msg)
+			cmds = append(cmds, cmd2)
 		}
 	}
 
@@ -1242,6 +1285,9 @@ func (m AppModel) viewHome() string {
 		ver = "v" + ver
 	}
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  %s", ver)))
+	if m.ispInfo != "" {
+		sb.WriteString(styleAccent.Render(fmt.Sprintf("  %s", m.ispInfo)))
+	}
 	sb.WriteRune('\n')
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  config: %s", getConfigFilePath())))
 	sb.WriteString("\n\n")
@@ -1843,7 +1889,11 @@ func (m *AppModel) toggleFocusedConfigPort() {
 func (m AppModel) viewScanWithConfig() string {
 	var sb strings.Builder
 
-	sb.WriteString(styleTitle.Render("\n  ⚡  Find Working IPs\n"))
+	title := "\n  ⚡  Find Working IPs"
+	if m.ispInfo != "" {
+		title += "  " + styleAccent.Render(fmt.Sprintf("[%s]", m.ispInfo))
+	}
+	sb.WriteString(title + "\n")
 	sb.WriteString(fmt.Sprintf("%s\n\n", styleSep.Render("  "+strings.Repeat("─", minInt(m.width-4, 70)))))
 
 	if !m.configScanning && !m.configDone {
@@ -2043,7 +2093,7 @@ func (m AppModel) viewScanWithConfig() string {
 		sb.WriteString(styleGood.Render("  "+m.statusMsg) + "\n")
 	}
 	if m.configDone {
-		hint := "  c copy working endpoints   q/esc back to menu"
+		hint := "  c copy working endpoints   e export Clash/Sing-Box/Sub configs   q/esc back to menu"
 		if m.liveResultPath != "" {
 			hint += "\n" + styleDim.Render("  live results → "+m.liveResultPath)
 		}
@@ -2123,6 +2173,11 @@ func (m AppModel) handleScanWithConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		if m.configDone {
 			m.statusMsg = m.copyWorkingIPs()
+			return m, nil
+		}
+	case "e":
+		if m.configDone {
+			m.statusMsg = m.exportAllConfigs()
 			return m, nil
 		}
 	}
@@ -2271,11 +2326,13 @@ func (m AppModel) viewConfigOptional() string {
 		}
 	}
 
-	rowLabel(0, "  Config ")
+	// Row 0: Config URL
+	rowLabel(0, "  Config    ")
 	sb.WriteString(" " + m.configInput.View() + "\n")
 	sb.WriteString(styleDim.Render("            optional — leave empty for Phase 1 only") + "\n\n")
 
-	rowLabel(1, "  Top N  ")
+	// Row 1: Top N
+	rowLabel(1, "  Top N     ")
 	sb.WriteString(" ")
 	renderPills(configTopNLabels, m.configTopNIdx)
 	sb.WriteString("\n")
@@ -2287,9 +2344,42 @@ func (m AppModel) viewConfigOptional() string {
 		sb.WriteString(styleDim.Render("            Phase 2 picks — used only when a config URL is entered") + "\n\n")
 	}
 
-	hint := "  ↑/↓ row   ←/→ option   enter start scan   esc back"
+	// Row 2: Min Speed
+	rowLabel(2, "  Min Speed ")
+	sb.WriteString(" ")
+	renderPills(configMinSpeedLabels, m.configMinSpeedIdx)
+	sb.WriteString("\n")
+	if m.configCustomMode && m.configCustomRow == 6 {
+		sb.WriteString(styleAccent.Render("            custom min speed: ") + m.configCustomInput.View() + " Mbps\n\n")
+	} else if m.configMinSpeedIdx == len(configMinSpeedLabels)-1 && m.configMinSpeedCustom != "" {
+		sb.WriteString(styleDim.Render(fmt.Sprintf("            filter healthy IPs below threshold  (custom: %s Mbps)", m.configMinSpeedCustom)) + "\n\n")
+	} else {
+		sb.WriteString(styleDim.Render("            filter healthy IPs below threshold") + "\n\n")
+	}
+
+	// Row 3: Speed URL
+	rowLabel(3, "  Speed URL ")
+	sb.WriteString(" " + m.configSpeedURLInput.View() + "\n")
+	sb.WriteString(styleDim.Render("            optional — leave empty for default speed.cloudflare.com") + "\n\n")
+
+	// Row 4: Speed Size
+	rowLabel(4, "  Speed Size")
+	sb.WriteString(" ")
+	renderPills(configSpeedSizeLabels, m.configSpeedSizeIdx)
+	sb.WriteString("\n")
+	if m.configCustomMode && m.configCustomRow == 7 {
+		sb.WriteString(styleAccent.Render("            custom speed size: ") + m.configCustomInput.View() + " MB\n\n")
+	} else if m.configSpeedSizeIdx == len(configSpeedSizeLabels)-1 && m.configSpeedSizeCustom != "" {
+		sb.WriteString(styleDim.Render(fmt.Sprintf("            download speed sample size  (custom: %s MB)", m.configSpeedSizeCustom)) + "\n\n")
+	} else {
+		sb.WriteString(styleDim.Render("            download speed sample size") + "\n\n")
+	}
+
+	hint := "  ↑/↓ row   ←/→ option   enter select/confirm   esc back"
 	if m.configOptionalRow == 0 {
-		hint = "  paste URL or leave empty   enter start   ↓ navigate   esc back"
+		hint = "  paste URL or leave empty   enter confirm/navigate   ↓ navigate   esc back"
+	} else if m.configOptionalRow == 3 {
+		hint = "  type custom download URL   enter confirm/navigate   esc back"
 	}
 	if m.configCustomMode {
 		hint = "  type value   enter confirm   esc cancel"
@@ -2308,8 +2398,13 @@ func (m AppModel) handleConfigOptionalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.configCustomMode {
 		switch msg.String() {
 		case "enter":
+			val := strings.TrimSpace(m.configCustomInput.Value())
 			if m.configCustomRow == 5 {
-				m.configTopNCustom = strings.TrimSpace(m.configCustomInput.Value())
+				m.configTopNCustom = val
+			} else if m.configCustomRow == 6 {
+				m.configMinSpeedCustom = val
+			} else if m.configCustomRow == 7 {
+				m.configSpeedSizeCustom = val
 			}
 			m.configCustomMode = false
 			m.configCustomInput.Blur()
@@ -2328,52 +2423,101 @@ func (m AppModel) handleConfigOptionalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.page = PageScanWithConfig
 		m.configInput.Blur()
+		m.configSpeedURLInput.Blur()
 		return m, nil
 	case "up", "k":
 		if m.configOptionalRow > 0 {
 			m.configOptionalRow--
+			m.configInput.Blur()
+			m.configSpeedURLInput.Blur()
 			if m.configOptionalRow == 0 {
 				m.configInput.Focus()
 				return m, textinput.Blink
+			} else if m.configOptionalRow == 3 {
+				m.configSpeedURLInput.Focus()
+				return m, textinput.Blink
 			}
-			m.configInput.Blur()
 		}
 		return m, nil
 	case "down", "j":
-		if m.configOptionalRow == 0 {
-			m.configOptionalRow = 1
+		if m.configOptionalRow < 4 {
+			m.configOptionalRow++
 			m.configInput.Blur()
-			return m, nil
+			m.configSpeedURLInput.Blur()
+			if m.configOptionalRow == 3 {
+				m.configSpeedURLInput.Focus()
+				return m, textinput.Blink
+			}
 		}
 		return m, nil
 	case "left", "h":
-		if m.configOptionalRow == 1 {
+		switch m.configOptionalRow {
+		case 1:
 			if m.configTopNIdx > 0 {
 				m.configTopNIdx--
 			}
-			return m, nil
+		case 2:
+			if m.configMinSpeedIdx > 0 {
+				m.configMinSpeedIdx--
+			}
+		case 4:
+			if m.configSpeedSizeIdx > 0 {
+				m.configSpeedSizeIdx--
+			}
 		}
+		return m, nil
 	case "right", "l":
-		if m.configOptionalRow == 1 {
+		switch m.configOptionalRow {
+		case 1:
 			if m.configTopNIdx < len(configTopNLabels)-1 {
 				m.configTopNIdx++
 			}
-			return m, nil
+		case 2:
+			if m.configMinSpeedIdx < len(configMinSpeedLabels)-1 {
+				m.configMinSpeedIdx++
+			}
+		case 4:
+			if m.configSpeedSizeIdx < len(configSpeedSizeLabels)-1 {
+				m.configSpeedSizeIdx++
+			}
 		}
+		return m, nil
 	case "enter":
 		if m.configOptionalRow == 0 {
-			if strings.TrimSpace(m.configInput.Value()) == "" {
+			rawURL := strings.TrimSpace(m.configInput.Value())
+			if rawURL == "" {
 				return m.launchPhase1FromOptional()
 			}
 			m.configOptionalRow = 1
 			m.configInput.Blur()
 			return m, nil
 		}
-		if m.isTopNCustomSelected() {
+		if m.configOptionalRow == 3 {
+			m.configOptionalRow = 4
+			m.configSpeedURLInput.Blur()
+			return m, nil
+		}
+		if m.configOptionalRow == 1 && m.isTopNCustomSelected() {
 			m.configCustomMode = true
 			m.configCustomRow = 5
 			m.configCustomInput.SetValue(m.configTopNCustom)
 			m.configCustomInput.Placeholder = "e.g. 75"
+			m.configCustomInput.Focus()
+			return m, textinput.Blink
+		}
+		if m.configOptionalRow == 2 && m.configMinSpeedIdx == len(configMinSpeedLabels)-1 {
+			m.configCustomMode = true
+			m.configCustomRow = 6
+			m.configCustomInput.SetValue(m.configMinSpeedCustom)
+			m.configCustomInput.Placeholder = "e.g. 3.5"
+			m.configCustomInput.Focus()
+			return m, textinput.Blink
+		}
+		if m.configOptionalRow == 4 && m.configSpeedSizeIdx == len(configSpeedSizeLabels)-1 {
+			m.configCustomMode = true
+			m.configCustomRow = 7
+			m.configCustomInput.SetValue(m.configSpeedSizeCustom)
+			m.configCustomInput.Placeholder = "e.g. 10 (MB)"
 			m.configCustomInput.Focus()
 			return m, textinput.Blink
 		}
@@ -2383,6 +2527,11 @@ func (m AppModel) handleConfigOptionalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.configOptionalRow == 0 {
 		var cmd tea.Cmd
 		m.configInput, cmd = m.configInput.Update(msg)
+		return m, cmd
+	}
+	if m.configOptionalRow == 3 {
+		var cmd tea.Cmd
+		m.configSpeedURLInput, cmd = m.configSpeedURLInput.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -2432,16 +2581,21 @@ func (m AppModel) launchPhase1FromOptional() (AppModel, tea.Cmd) {
 
 	// Save the current config to disk
 	savedCfg := SavedConfig{
-		IPMode:        m.configIPMode,
-		CountIdx:      m.configCountIdx,
-		CountCustom:   m.configCountCustom,
-		WorkersIdx:    m.configWorkersIdx,
-		WorkersCustom: m.configWorkersCustom,
-		TimeoutIdx:    m.configTimeoutIdx,
-		TimeoutCustom: m.configTimeoutCustom,
-		ConfigURL:     rawURL,
-		TopNIdx:       m.configTopNIdx,
-		TopNCustom:    m.configTopNCustom,
+		IPMode:          m.configIPMode,
+		CountIdx:        m.configCountIdx,
+		CountCustom:     m.configCountCustom,
+		WorkersIdx:      m.configWorkersIdx,
+		WorkersCustom:   m.configWorkersCustom,
+		TimeoutIdx:      m.configTimeoutIdx,
+		TimeoutCustom:   m.configTimeoutCustom,
+		ConfigURL:       rawURL,
+		TopNIdx:         m.configTopNIdx,
+		TopNCustom:      m.configTopNCustom,
+		MinSpeedIdx:     m.configMinSpeedIdx,
+		MinSpeedCustom:  m.configMinSpeedCustom,
+		SpeedURL:        strings.TrimSpace(m.configSpeedURLInput.Value()),
+		SpeedSizeIdx:    m.configSpeedSizeIdx,
+		SpeedSizeCustom: m.configSpeedSizeCustom,
 	}
 	for port, on := range m.configSelectedPorts {
 		if on {
@@ -2928,13 +3082,16 @@ func (m AppModel) resolveConfigPorts() []int {
 
 func (m AppModel) startConfigPhase2(topIPs []*result.Result) tea.Cmd {
 	url := m.configURL
+	minSpeed := m.resolveMinSpeed()
+	speedURL := strings.TrimSpace(m.configSpeedURLInput.Value())
+	speedSize := m.resolveSpeedSize()
 	return func() tea.Msg {
-		go runConfigPhase2(url, topIPs)
+		go runConfigPhase2(url, topIPs, minSpeed, speedURL, speedSize)
 		return nil
 	}
 }
 
-func runConfigPhase2(rawURL string, topIPs []*result.Result) {
+func runConfigPhase2(rawURL string, topIPs []*result.Result, minSpeed float64, speedURL string, speedSize int64) {
 	cfg, err := xraytest.ParseProxyURL(rawURL)
 	if err != nil {
 		if prog != nil {
@@ -2987,7 +3144,16 @@ func runConfigPhase2(rawURL string, topIPs []*result.Result) {
 			defer func() { <-sem }()
 
 			swapped := cfg.WithEndpoint(r.IP.String(), r.Port)
+			swapped.SpeedURL = speedURL
+			swapped.SpeedSize = speedSize
 			vr := xraytest.ValidateConfig(ctx, swapped, 22*time.Second)
+			if vr.Success && minSpeed > 0 {
+				mbps := vr.Throughput * 8 / 1_000_000
+				if mbps < minSpeed {
+					vr.Success = false
+					vr.Error = fmt.Sprintf("speed below threshold (%.1f < %.1f Mbps)", mbps, minSpeed)
+				}
+			}
 			if liveResultWriter != nil {
 				liveResultWriter.AddPhase2(vr)
 			}
@@ -3006,4 +3172,221 @@ func runConfigPhase2(rawURL string, topIPs []*result.Result) {
 	if prog != nil {
 		prog.Send(ConfigDoneMsg{})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Config Resolvers and Exporters
+// ---------------------------------------------------------------------------
+
+var configMinSpeedValues = []float64{0.0, 1.0, 2.0, 5.0, -1.0} // -1.0 = custom
+var configMinSpeedLabels = []string{"None", "1 Mbps", "2 Mbps", "5 Mbps", "Custom"}
+
+var configSpeedSizeValues = []int64{128 * 1024, 512 * 1024, 1024 * 1024, 5 * 1024 * 1024, 0} // 0 = custom
+var configSpeedSizeLabels = []string{"128 KB", "512 KB (default)", "1 MB", "5 MB", "Custom"}
+
+func (m AppModel) resolveMinSpeed() float64 {
+	if m.configMinSpeedIdx == len(configMinSpeedLabels)-1 {
+		n, _ := strconv.ParseFloat(strings.TrimSpace(m.configMinSpeedCustom), 64)
+		if n <= 0 {
+			return 0
+		}
+		return n
+	}
+	if m.configMinSpeedIdx < 0 || m.configMinSpeedIdx >= len(configMinSpeedValues) {
+		return 0
+	}
+	return configMinSpeedValues[m.configMinSpeedIdx]
+}
+
+func (m AppModel) resolveSpeedSize() int64 {
+	if m.configSpeedSizeIdx == len(configSpeedSizeLabels)-1 {
+		n, _ := strconv.ParseInt(strings.TrimSpace(m.configSpeedSizeCustom), 10)
+		if n <= 0 {
+			return 512 * 1024
+		}
+		return n * 1024 * 1024 // Custom input is in MB
+	}
+	if m.configSpeedSizeIdx < 0 || m.configSpeedSizeIdx >= len(configSpeedSizeValues) {
+		return 512 * 1024
+	}
+	return configSpeedSizeValues[m.configSpeedSizeIdx]
+}
+
+func (m AppModel) exportAllConfigs() string {
+	endpoints := workingEndpoints(m.configResults)
+	if len(endpoints) == 0 {
+		return "no working endpoints to export"
+	}
+
+	cfg, err := xraytest.ParseProxyURL(m.configURL)
+	if err != nil {
+		return fmt.Sprintf("invalid config URL: %v", err)
+	}
+
+	exe, err := os.Executable()
+	dir := ""
+	if err == nil {
+		dir = filepath.Dir(exe)
+	}
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	if dir == "" {
+		dir = "."
+	}
+
+	// 1. Export Subscription URLs
+	var subUrls []string
+	for _, ep := range endpoints {
+		parts := strings.Split(ep, ":")
+		port := cfg.Port
+		if len(parts) > 1 {
+			port, _ = strconv.Atoi(parts[1])
+		}
+		swapped := cfg.WithEndpoint(parts[0], port)
+		subUrls = append(subUrls, swapped.ToShareURL())
+	}
+	subPath := filepath.Join(dir, "senpaiscanner-sub.txt")
+	_ = os.WriteFile(subPath, []byte(strings.Join(subUrls, "\n")+"\n"), 0644)
+
+	// 2. Export Sing-Box JSON
+	type SBOutbound struct {
+		Type       string                 `json:"type"`
+		Tag        string                 `json:"tag"`
+		Server     string                 `json:"server"`
+		ServerPort int                    `json:"server_port"`
+		UUID       string                 `json:"uuid,omitempty"`
+		Password   string                 `json:"password,omitempty"`
+		TLS        map[string]interface{} `json:"tls,omitempty"`
+		Transport  map[string]interface{} `json:"transport,omitempty"`
+	}
+
+	var sbOutbounds []interface{}
+	for i, ep := range endpoints {
+		parts := strings.Split(ep, ":")
+		ip := parts[0]
+		port := cfg.Port
+		if len(parts) > 1 {
+			port, _ = strconv.Atoi(parts[1])
+		}
+		tag := fmt.Sprintf("CF-Endpoint-%d", i+1)
+
+		o := SBOutbound{
+			Type:       cfg.Protocol,
+			Tag:        tag,
+			Server:     ip,
+			ServerPort: port,
+		}
+
+		if cfg.Protocol == "trojan" {
+			o.Password = cfg.Password
+		} else { // vless or vmess
+			o.UUID = cfg.UUID
+		}
+
+		// TLS
+		if cfg.Security == "tls" {
+			tlsConf := map[string]interface{}{
+				"enabled":     true,
+				"server_name": cfg.SNI,
+			}
+			if cfg.Fingerprint != "" {
+				tlsConf["utls"] = map[string]interface{}{
+					"enabled":     true,
+					"fingerprint": cfg.Fingerprint,
+				}
+			}
+			if len(cfg.ALPN) > 0 {
+				tlsConf["alpn"] = cfg.ALPN
+			}
+			o.TLS = tlsConf
+		}
+
+		// Transport
+		if cfg.Network == "ws" {
+			wsConf := map[string]interface{}{
+				"type": "ws",
+				"path": cfg.Path,
+			}
+			if cfg.Host != "" {
+				wsConf["headers"] = map[string]interface{}{
+					"Host": cfg.Host,
+				}
+			}
+			o.Transport = wsConf
+		} else if cfg.Network == "grpc" {
+			grpcConf := map[string]interface{}{
+				"type":         "grpc",
+				"service_name": cfg.ServiceName,
+			}
+			o.Transport = grpcConf
+		}
+
+		sbOutbounds = append(sbOutbounds, o)
+	}
+
+	// Minimal Sing-Box client config
+	sbConfig := map[string]interface{}{
+		"outbounds": sbOutbounds,
+	}
+	sbJSON, _ := json.MarshalIndent(sbConfig, "", "  ")
+	sbPath := filepath.Join(dir, "senpaiscanner-singbox.json")
+	_ = os.WriteFile(sbPath, sbJSON, 0644)
+
+	// 3. Export Clash YAML
+	var clashLines []string
+	clashLines = append(clashLines, "proxies:")
+	for i, ep := range endpoints {
+		parts := strings.Split(ep, ":")
+		ip := parts[0]
+		port := cfg.Port
+		if len(parts) > 1 {
+			port, _ = strconv.Atoi(parts[1])
+		}
+		name := fmt.Sprintf("CF-Endpoint-%d", i+1)
+
+		clashLines = append(clashLines, fmt.Sprintf("  - name: \"%s\"", name))
+		clashLines = append(clashLines, fmt.Sprintf("    type: %s", cfg.Protocol))
+		clashLines = append(clashLines, fmt.Sprintf("    server: %s", ip))
+		clashLines = append(clashLines, fmt.Sprintf("    port: %d", port))
+
+		if cfg.Protocol == "trojan" {
+			clashLines = append(clashLines, fmt.Sprintf("    password: %s", cfg.Password))
+			clashLines = append(clashLines, "    udp: true")
+		} else { // vless or vmess
+			clashLines = append(clashLines, fmt.Sprintf("    uuid: %s", cfg.UUID))
+			if cfg.Protocol == "vmess" {
+				clashLines = append(clashLines, "    alterId: 0")
+				clashLines = append(clashLines, "    cipher: auto")
+			}
+		}
+
+		if cfg.Security == "tls" {
+			clashLines = append(clashLines, "    tls: true")
+			if cfg.SNI != "" {
+				clashLines = append(clashLines, fmt.Sprintf("    servername: %s", cfg.SNI))
+			}
+			if cfg.Fingerprint != "" {
+				clashLines = append(clashLines, fmt.Sprintf("    client-fingerprint: %s", cfg.Fingerprint))
+			}
+		}
+
+		if cfg.Network == "ws" {
+			clashLines = append(clashLines, "    network: ws")
+			clashLines = append(clashLines, "    ws-opts:")
+			clashLines = append(clashLines, fmt.Sprintf("      path: %s", cfg.Path))
+			if cfg.Host != "" {
+				clashLines = append(clashLines, "      headers:")
+				clashLines = append(clashLines, fmt.Sprintf("        Host: %s", cfg.Host))
+			}
+		} else if cfg.Network == "grpc" {
+			clashLines = append(clashLines, "    network: grpc")
+			clashLines = append(clashLines, "    grpc-opts:")
+			clashLines = append(clashLines, fmt.Sprintf("      grpc-service-name: %s", cfg.ServiceName))
+		}
+	}
+	clashPath := filepath.Join(dir, "senpaiscanner-clash.yaml")
+	_ = os.WriteFile(clashPath, []byte(strings.Join(clashLines, "\n")+"\n"), 0644)
+
+	return fmt.Sprintf("✓ configs exported to Clash, Sing-Box, and Sub files in %s", dir)
 }
