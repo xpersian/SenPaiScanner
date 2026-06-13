@@ -47,15 +47,17 @@ func nextPort() int {
 
 // ValidationResult holds the outcome of testing a VLESS config through xray.
 type ValidationResult struct {
-	IP         string
-	Port       int
-	Success    bool
-	Latency    time.Duration // time to first byte
-	Throughput float64       // bytes/sec for download test
-	BytesRecv  int64
-	Error      string
-	Transport  string // ws, grpc, xhttp
-	Retries    int    // how many attempts were needed
+	IP              string
+	Port            int
+	Success         bool
+	Latency         time.Duration // time to first byte
+	Throughput      float64       // bytes/sec for download test
+	BytesRecv       int64
+	UploadThroughput float64      // bytes/sec for upload test (0 if not tested)
+	UploadBytesSent  int64
+	Error           string
+	Transport       string // ws, grpc, xhttp
+	Retries         int    // how many attempts were needed
 }
 
 // ValidateConfig starts an xray instance with the given config, sends test
@@ -178,6 +180,16 @@ func validateOnce(ctx context.Context, cfg *VLESSConfig, timeout time.Duration) 
 	res.BytesRecv = bytesRecv
 	res.Throughput = throughput
 	res.Success = true
+
+	// Step 3: optional upload speed test.
+	if cfg.UploadTest {
+		uploadCtx, uploadCancel := context.WithTimeout(ctx, speedBudget(timeout, latency))
+		defer uploadCancel()
+		uploadSent, uploadThroughput := measureProxyUploadSpeed(uploadCtx, proxyURL, cfg)
+		res.UploadBytesSent = uploadSent
+		res.UploadThroughput = uploadThroughput
+	}
+
 	return res
 }
 
@@ -525,6 +537,119 @@ func measureProxySpeed(ctx context.Context, proxyAddr string, cfg *VLESSConfig) 
 	// WS/xhttp tunnels often block speed.cloudflare.com but still carry trace traffic.
 	// Estimate throughput by saturating the known-good trace endpoint in parallel.
 	return burstProxyThroughput(ctx, proxyAddr, traceProbeURL, burstBytes)
+}
+
+// measureProxyUploadSpeed measures upload throughput through a SOCKS5 proxy by
+// sending a POST request with a synthetic body to an upload-capable endpoint.
+func measureProxyUploadSpeed(ctx context.Context, proxyAddr string, cfg *VLESSConfig) (int64, float64) {
+	sampleBytes := int64(speedSampleBytesFast)
+	if cfg != nil && cfg.SpeedSize > 0 {
+		sampleBytes = cfg.SpeedSize
+	}
+	if sampleBytes < speedMinBytes {
+		sampleBytes = speedMinBytes
+	}
+
+	// Upload targets — POST to cloudflare trace (always accepts body) or the
+	// config host. The upload goes through the xray SOCKS proxy so it measures
+	// real upstream capacity.
+	var targets []speedTarget
+	if cfg != nil {
+		host := cfg.Host
+		if host == "" {
+			host = cfg.SNI
+		}
+		port := cfg.Port
+		if port <= 0 {
+			port = 443
+		}
+		scheme := "https"
+		if port == 80 {
+			scheme = "http"
+		}
+		if host != "" && cfg.Address != "" {
+			targets = append(targets, speedTarget{
+				url:      fmt.Sprintf("%s://%s/cdn-cgi/trace", scheme, net.JoinHostPort(cfg.Address, strconv.Itoa(port))),
+				host:     host,
+				relaxed:  true,
+				minBytes: 1,
+			})
+		}
+	}
+	targets = append(targets, speedTarget{
+		url:      traceProbeURL,
+		relaxed:  true,
+		minBytes: 1,
+	})
+
+	for _, target := range targets {
+		sent, throughput, err := uploadThroughProxy(ctx, proxyAddr, target.url, sampleBytes, target.relaxed, target.host)
+		if err == nil && sent > 0 && throughput > 0 {
+			return sent, throughput
+		}
+	}
+
+	return 0, 0
+}
+
+// uploadThroughProxy sends a POST request with a synthetic body through a SOCKS5
+// proxy and returns bytes sent plus throughput in bytes/sec.
+func uploadThroughProxy(ctx context.Context, proxyAddr, uploadURL string, maxBytes int64, relaxed bool, authority string) (int64, float64, error) {
+	if maxBytes <= 0 {
+		return 0, 0, fmt.Errorf("invalid maxBytes %d", maxBytes)
+	}
+
+	client := &http.Client{
+		Transport: proxyTransportForTarget(proxyAddr, uploadURL, authority),
+		Timeout:   clientTimeoutForContext(ctx, 30*time.Second),
+	}
+
+	body := io.LimitReader(randReader(), maxBytes)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, body)
+	if err != nil {
+		return 0, 0, err
+	}
+	req.ContentLength = maxBytes
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("User-Agent", "senpaiscanner/1.0")
+	if authority != "" {
+		req.Host = authority
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+
+	if !relaxed && (resp.StatusCode < 200 || resp.StatusCode >= 400) {
+		return 0, 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if relaxed && resp.StatusCode >= 500 {
+		return 0, 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	elapsed := time.Since(start).Seconds()
+	if elapsed <= 0 {
+		return maxBytes, 0, nil
+	}
+	return maxBytes, float64(maxBytes) / elapsed, nil
+}
+
+// randReader returns an io.Reader that yields random bytes.
+var randReader = func() io.Reader {
+	return &zeroReader{}
+}
+
+type zeroReader struct{}
+
+func (z *zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 func speedTestTargets(cfg *VLESSConfig, sampleBytes int64) []speedTarget {

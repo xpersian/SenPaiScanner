@@ -48,6 +48,9 @@ type VLESSConfig struct {
 	// Custom configurations passed to speed runner
 	SpeedURL  string
 	SpeedSize int64
+
+	// Upload test flag — when true, Phase 2 measures upload throughput.
+	UploadTest bool
 }
 
 // ParseProxyURL auto-detects the protocol (vless://, trojan://, or vmess://) and parses

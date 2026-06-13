@@ -241,7 +241,7 @@ type AppModel struct {
 	configWorkersCustom string // value when Custom workers is selected
 	configTimeoutCustom string // value when Custom timeout is selected
 	configTopNCustom    string // value when Custom top N is selected
-	configOptionalRow   int    // 0=config URL, 1=validate top N, 2=min speed, 3=speed url, 4=speed size
+	configOptionalRow   int    // 0=config URL, 1=validate top N, 2=min speed, 3=speed url, 4=speed size, 5=upload test
 	configPortFocus     int
 	configSelectedPorts map[int]bool
 	// phase 1 state
@@ -257,6 +257,7 @@ type AppModel struct {
 	configSpeedURLInput   textinput.Model
 	configSpeedSizeIdx    int
 	configSpeedSizeCustom string
+	configUploadTest      bool
 	ispInfo               string
 
 	// shared
@@ -307,6 +308,7 @@ type SavedConfig struct {
 	SpeedURL        string `json:"speed_url"`
 	SpeedSizeIdx    int    `json:"speed_size_idx"`
 	SpeedSizeCustom string `json:"speed_size_custom"`
+	UploadTest      bool   `json:"upload_test"`
 	RequireWS       bool   `json:"require_ws"`
 }
 
@@ -391,6 +393,7 @@ func (m *AppModel) applySavedConfig(cfg SavedConfig) {
 	m.configSpeedURLInput.SetValue(cfg.SpeedURL)
 	m.configSpeedSizeIdx = cfg.SpeedSizeIdx
 	m.configSpeedSizeCustom = cfg.SpeedSizeCustom
+	m.configUploadTest = cfg.UploadTest
 	m.configSelectedPorts = make(map[int]bool)
 	for _, port := range cfg.Ports {
 		m.configSelectedPorts[port] = true
@@ -1294,12 +1297,17 @@ func (m AppModel) viewHome() string {
 		ver = "v" + ver
 	}
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  %s", ver)))
-	if m.ispInfo != "" {
-		sb.WriteString(styleAccent.Render(fmt.Sprintf("  %s", m.ispInfo)))
-	}
 	sb.WriteRune('\n')
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  config: %s", getConfigFilePath())))
 	sb.WriteString("\n\n")
+
+	// ISP info — prominent display
+	if m.ispInfo != "" {
+		sb.WriteString(fmt.Sprintf("  %s  %s\n\n",
+			styleAccent.Render("🌐"),
+			styleAccent.Render(m.ispInfo),
+		))
+	}
 
 	// Menu
 	for i, item := range menuEntries {
@@ -2089,9 +2097,17 @@ func (m AppModel) viewScanWithConfig() string {
 	}
 
 	// Table header
-	hdr := fmt.Sprintf("  %-22s  %-8s  %8s  %8s  %6s",
-		"ENDPOINT", "TYPE", "SPEED", "LATENCY", "STATUS")
-	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", 64))))
+	uploadCol := m.configUploadTest
+	hdr := fmt.Sprintf("  %-22s  %-8s  %8s", "ENDPOINT", "TYPE", "SPEED")
+	if uploadCol {
+		hdr += fmt.Sprintf("  %8s", "UPLOAD")
+	}
+	hdr += fmt.Sprintf("  %8s  %6s", "LATENCY", "STATUS")
+	sepLen := 64
+	if uploadCol {
+		sepLen += 10
+	}
+	sb.WriteString(fmt.Sprintf("%s\n%s\n", styleHeader.Render(hdr), styleSep.Render("  "+strings.Repeat("─", sepLen))))
 
 	// Results
 	maxRows := m.height - 12
@@ -2106,16 +2122,26 @@ func (m AppModel) viewScanWithConfig() string {
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
 		if r.Success {
-			line := fmt.Sprintf("  %-22s  %-8s  %8s  %8s  %6s",
-				formatEndpoint(r.IP, r.Port), r.Transport, formatValidationSpeed(r.Throughput), formatValidationLatency(r.Latency), "✓")
+			line := fmt.Sprintf("  %-22s  %-8s  %8s", formatEndpoint(r.IP, r.Port), r.Transport, formatValidationSpeed(r.Throughput))
+			if uploadCol {
+				if r.UploadThroughput > 0 {
+					line += fmt.Sprintf("  %8s", formatValidationSpeed(r.UploadThroughput))
+				} else {
+					line += fmt.Sprintf("  %8s", "—")
+				}
+			}
+			line += fmt.Sprintf("  %8s  %6s", formatValidationLatency(r.Latency), "✓")
 			sb.WriteString(styleGood.Render(line) + "\n")
 		} else {
 			errMsg := r.Error
 			if len(errMsg) > 20 {
 				errMsg = errMsg[:20] + "…"
 			}
-			line := fmt.Sprintf("  %-22s  %-8s  %9s  %8s  %6s",
-				formatEndpoint(r.IP, r.Port), r.Transport, "—", "—", "✗")
+			line := fmt.Sprintf("  %-22s  %-8s  %9s", formatEndpoint(r.IP, r.Port), r.Transport, "—")
+			if uploadCol {
+				line += fmt.Sprintf("  %8s", "—")
+			}
+			line += fmt.Sprintf("  %8s  %6s", "—", "✗")
 			sb.WriteString(styleBad.Render(line) + "\n")
 		}
 	}
@@ -2418,6 +2444,17 @@ func (m AppModel) viewConfigOptional() string {
 		sb.WriteString(styleDim.Render("            download speed sample size") + "\n\n")
 	}
 
+	// Row 5: Upload Test
+	rowLabel(5, "  Upload    ")
+	sb.WriteString(" ")
+	if m.configUploadTest {
+		sb.WriteString(styleGood.Render("ON"))
+	} else {
+		sb.WriteString(styleBad.Render("OFF"))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(styleDim.Render("            measure upload speed in Phase 2 (space toggle)") + "\n\n")
+
 	hint := "  ↑/↓ row   ←/→ option   enter select/confirm   esc back"
 	if m.configOptionalRow == 0 {
 		hint = "  paste URL, ctrl+x clear   enter confirm/navigate   ↓ navigate   esc back"
@@ -2487,7 +2524,7 @@ func (m AppModel) handleConfigOptionalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "down":
-			if m.configOptionalRow < 4 {
+			if m.configOptionalRow < 5 {
 				m.configOptionalRow++
 				m.configInput.Blur()
 				m.configSpeedURLInput.Blur()
@@ -2536,7 +2573,7 @@ func (m AppModel) handleConfigOptionalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// --- When navigation rows (1, 2, 4) are focused ---
+	// --- When navigation rows (1, 2, 4, 5) are focused ---
 	switch msg.String() {
 	case "esc":
 		m.page = PageScanWithConfig
@@ -2560,7 +2597,7 @@ func (m AppModel) handleConfigOptionalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down", "j":
-		if m.configOptionalRow < 4 {
+		if m.configOptionalRow < 5 {
 			m.configOptionalRow++
 			m.configInput.Blur()
 			m.configSpeedURLInput.Blur()
@@ -2602,6 +2639,12 @@ func (m AppModel) handleConfigOptionalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.configSpeedSizeIdx < len(configSpeedSizeLabels)-1 {
 				m.configSpeedSizeIdx++
 			}
+		}
+		return m, nil
+
+	case " ":
+		if m.configOptionalRow == 5 {
+			m.configUploadTest = !m.configUploadTest
 		}
 		return m, nil
 
@@ -2695,6 +2738,7 @@ func (m AppModel) launchPhase1FromOptional() (AppModel, tea.Cmd) {
 		SpeedURL:        strings.TrimSpace(m.configSpeedURLInput.Value()),
 		SpeedSizeIdx:    m.configSpeedSizeIdx,
 		SpeedSizeCustom: m.configSpeedSizeCustom,
+		UploadTest:      m.configUploadTest,
 		RequireWS:       m.scanCfg.RequireWS,
 	}
 	for port, on := range m.configSelectedPorts {
@@ -3191,6 +3235,7 @@ func (m AppModel) startConfigPhase2(topIPs []*result.Result) tea.Cmd {
 	speedURL := strings.TrimSpace(m.configSpeedURLInput.Value())
 	speedSize := m.resolveSpeedSize()
 	timeout := m.resolveTimeout()
+	uploadTest := m.configUploadTest
 
 	// Xray validation has startup and SOCKS proxy overheads.
 	// We enforce a minimum floor of 10s and scale with the user timeout.
@@ -3220,12 +3265,12 @@ func (m AppModel) startConfigPhase2(topIPs []*result.Result) tea.Cmd {
 	xrayTimeout += speedLimit
 
 	return func() tea.Msg {
-		go runConfigPhase2(url, topIPs, minSpeed, speedURL, speedSize, xrayTimeout)
+		go runConfigPhase2(url, topIPs, minSpeed, speedURL, speedSize, xrayTimeout, uploadTest)
 		return nil
 	}
 }
 
-func runConfigPhase2(rawURL string, topIPs []*result.Result, minSpeed float64, speedURL string, speedSize int64, timeout time.Duration) {
+func runConfigPhase2(rawURL string, topIPs []*result.Result, minSpeed float64, speedURL string, speedSize int64, timeout time.Duration, uploadTest bool) {
 	cfg, err := xraytest.ParseProxyURL(rawURL)
 	if err != nil {
 		if prog != nil {
@@ -3279,6 +3324,7 @@ func runConfigPhase2(rawURL string, topIPs []*result.Result, minSpeed float64, s
 			swapped := cfg.WithEndpoint(r.IP.String(), r.Port)
 			swapped.SpeedURL = speedURL
 			swapped.SpeedSize = speedSize
+			swapped.UploadTest = uploadTest
 			vr := xraytest.ValidateConfig(ctx, swapped, timeout)
 			if vr.Success && minSpeed > 0 {
 				mbps := vr.Throughput * 8 / 1_000_000
