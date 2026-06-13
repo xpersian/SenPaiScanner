@@ -1297,12 +1297,17 @@ func (m AppModel) viewHome() string {
 		ver = "v" + ver
 	}
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  %s", ver)))
-	if m.ispInfo != "" {
-		sb.WriteString(styleAccent.Render(fmt.Sprintf("  %s", m.ispInfo)))
-	}
 	sb.WriteRune('\n')
 	sb.WriteString(styleDim.Render(fmt.Sprintf("  config: %s", getConfigFilePath())))
 	sb.WriteString("\n\n")
+
+	// ISP info — prominent display
+	if m.ispInfo != "" {
+		sb.WriteString(fmt.Sprintf("  %s  %s\n\n",
+			styleAccent.Render("🌐"),
+			styleAccent.Render(m.ispInfo),
+		))
+	}
 
 	// Menu
 	for i, item := range menuEntries {
