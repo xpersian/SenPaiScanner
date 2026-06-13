@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -775,6 +776,50 @@ func FetchMetaCmd() tea.Cmd {
 					return MetaMsg{
 						ASOrganization: raw.ISP,
 						IP:             raw.IP,
+					}
+				}
+			}
+		}
+
+		// Fallback 2: ip.dnslab.link (Iranian IP provider).
+		resp3, err3 := client.Get("http://ip.dnslab.link")
+		if err3 == nil {
+			defer resp3.Body.Close()
+			if resp3.StatusCode >= 200 && resp3.StatusCode < 300 {
+				bodyBytes, err := io.ReadAll(io.LimitReader(resp3.Body, 64))
+				if err == nil {
+					ipStr := strings.TrimSpace(string(bodyBytes))
+					if net.ParseIP(ipStr) != nil {
+						ispName, found := LookupIranISP(ipStr)
+						if !found {
+							ispName = "Iranian ISP"
+						}
+						return MetaMsg{
+							ASOrganization: ispName,
+							IP:             ipStr,
+						}
+					}
+				}
+			}
+		}
+
+		// Fallback 3: ipify.ir (Iranian IP provider).
+		resp4, err4 := client.Get("http://ipify.ir")
+		if err4 == nil {
+			defer resp4.Body.Close()
+			if resp4.StatusCode >= 200 && resp4.StatusCode < 300 {
+				bodyBytes, err := io.ReadAll(io.LimitReader(resp4.Body, 64))
+				if err == nil {
+					ipStr := strings.TrimSpace(string(bodyBytes))
+					if net.ParseIP(ipStr) != nil {
+						ispName, found := LookupIranISP(ipStr)
+						if !found {
+							ispName = "Iranian ISP"
+						}
+						return MetaMsg{
+							ASOrganization: ispName,
+							IP:             ipStr,
+						}
 					}
 				}
 			}
